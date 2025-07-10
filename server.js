@@ -6,7 +6,7 @@ const { GoogleGenAI, Modality } = require('@google/genai');
 
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 3000;
-const API_KEY = "YOUR_API_KEY_HERE"; // IMPORTANT: PASTE YOUR API KEY HERE
+const API_KEY = process.env.API_KEY;
 const MODEL_NAME = "gemini-2.5-flash-preview-native-audio-dialog";
 
 if (API_KEY === "YOUR_API_KEY_HERE") {
