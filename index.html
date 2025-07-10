@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trabajo Pirrónico</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
+    <link rel="stylesheet" href="https://code.getmdl.io/1.3.0/material.blue_grey-pink.min.css" />
+    <script defer src="https://code.getmdl.io/1.3.0/material.min.js"></script>
+    <style>
+        :root {
+            --dark-bg: #1f1f1f;
+            --card-bg: #2a2a2a;
+            --primary-text: #e0e0e0;
+            --secondary-text: #b0b0b0;
+            --border-color: #444;
+            --primary-color: #81d4fa; /* Light Blue */
+            --accent-color: #f48fb1; /* Light Pink */
+            --pulse-color: rgba(129, 212, 250, 0.4);
+        }
+        body { background-color: var(--dark-bg); color: var(--primary-text); font-family: 'Roboto', 'Helvetica', 'Arial', sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .app-card { width: 90%; max-width: 500px; background-color: var(--card-bg); border-radius: 16px; }
+        .mdl-card__title { background-color: transparent; color: var(--primary-text); }
+        .mdl-card__supporting-text { color: var(--primary-text); width: 100%; box-sizing: border-box; }
+        #status-display { font-style: italic; color: var(--secondary-text); height: 24px; display: flex; align-items: center; justify-content: center; text-align: center; }
+        #transcript-container { margin-top: 16px; padding: 12px; border: 1px solid var(--border-color); border-radius: 8px; height: 150px; overflow-y: auto; background-color: var(--dark-bg); }
+        #transcript-container p { margin: 0 0 8px 0; word-wrap: break-word; }
+        .mdl-card__actions { background-color: transparent; border-top: 1px solid var(--border-color); display: flex; justify-content: center; padding: 24px 16px; }
+        #toggle-btn { background-color: var(--primary-color); color: var(--dark-bg); }
+        #toggle-btn.is-active { background-color: var(--accent-color); }
+        #toggle-btn.is-listening { animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 var(--pulse-color); } 70% { box-shadow: 0 0 0 20px rgba(0, 0, 0, 0); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
+    </style>
+</head>
+<body>
+    <div class="mdl-card mdl-shadow--8dp app-card">
+        <div class="mdl-card__title"> <h2 class="mdl-card__title-text">Trabajo Pirrónico</h2> </div>
+        <div class="mdl-card__supporting-text">
+            <div id="status-display">Ready to connect</div>
+            <div id="transcript-container"></div>
+        </div>
+        <div class="mdl-card__actions">
+            <button id="toggle-btn" class="mdl-button mdl-js-button mdl-button--fab mdl-js-ripple-effect mdl-button--colored"> <i class="material-icons">mic</i> </button>
+        </div>
+    </div>
+
+    <script>
+        const toggleBtn = document.getElementById('toggle-btn');
+        const toggleBtnIcon = toggleBtn.querySelector('i');
+        const statusDisplay = document.getElementById('status-display');
+        const transcriptContainer = document.getElementById('transcript-container');
+
+        let isRecording = false;
+        let socket;
+        let audioContext, workletNode, mediaStream;
+        const audioResponseQueue = [];
+        let isPlaying = false;
+        const TARGET_SAMPLE_RATE = 16000;
+        let currentAiParagraph = null;
+
+        toggleBtn.addEventListener('click', toggleConversation);
+
+        function toggleConversation() {
+            if (isRecording) stopConversation();
+            else startConversation();
+        }
+
+        async function startConversation() {
+            isRecording = true;
+            updateButtonUI(true);
+            transcriptContainer.innerHTML = "";
+            currentAiParagraph = null;
+            
+            try {
+                statusDisplay.textContent = "Solicitando acceso al micrófono...";
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+                if (!isRecording) {
+                    if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
+                    return;
+                }
+
+                statusDisplay.textContent = "Inicializando audio...";
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                await audioContext.audioWorklet.addModule('audio-processor.js');
+                workletNode = new AudioWorkletNode(audioContext, 'audio-processor');
+                
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                source.connect(workletNode);
+
+                workletNode.port.onmessage = (event) => {
+                    if (!isRecording || !socket || socket.readyState !== WebSocket.OPEN) return;
+                    
+                    const inputData = event.data;
+                    const downsampledData = downsampleBuffer(inputData, audioContext.sampleRate, TARGET_SAMPLE_RATE);
+                    const pcm16Data = floatTo16BitPCM(downsampledData);
+                    
+                    const pcmBytes = new Uint8Array(pcm16Data.buffer);
+                    const base64Audio = btoa(String.fromCharCode(...pcmBytes));
+                    
+                    socket.send(JSON.stringify({ audio: { data: base64Audio } }));
+                };
+
+                statusDisplay.textContent = "Conectando al servidor...";
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const socketURL = `${protocol}//${window.location.host}`;
+                socket = new WebSocket(socketURL);
+
+                socket.onopen = () => {
+                    statusDisplay.textContent = "Escuchando...";
+                    toggleBtn.classList.add('is-listening');
+                };
+
+                socket.onmessage = (event) => handleServerMessage(JSON.parse(event.data));
+                socket.onerror = (error) => { console.error("WebSocket Error:", error); statusDisplay.textContent = "Error de conexión."; stopConversation(); };
+                socket.onclose = () => { if (isRecording) stopConversation(); };
+
+            } catch (error) {
+                console.error("Failed to start conversation:", error);
+                statusDisplay.textContent = `Error: ${error.message}`;
+                stopConversation();
+            }
+        }
+
+        function stopConversation() {
+            if (!isRecording) return;
+            isRecording = false;
+            updateButtonUI(false);
+            statusDisplay.textContent = "Conversación terminada.";
+            stopMicrophone();
+            if (socket) { socket.close(); socket = null; }
+            audioResponseQueue.length = 0;
+            isPlaying = false;
+        }
+        
+        function stopMicrophone() {
+            if (workletNode) { workletNode.port.onmessage = null; workletNode.disconnect(); workletNode = null; }
+            if (mediaStream) { mediaStream.getTracks().forEach(track => track.stop()); mediaStream = null; }
+            if (audioContext && audioContext.state !== 'closed') { audioContext.close().catch(console.error); audioContext = null; }
+        }
+
+        function handleServerMessage(message) {
+            // --- FIX: Handle tagged audio messages separately ---
+            if (message.type === 'AUDIO') {
+                audioResponseQueue.push(message.data); // This is now guaranteed to be base-64
+                playNextChunk();
+            }
+
+            const transcript = message.serverContent?.outputTranscription?.text;
+            if (transcript) {
+                if (!currentAiParagraph) {
+                    currentAiParagraph = document.createElement('p');
+                    currentAiParagraph.textContent = "AI: ";
+                    transcriptContainer.appendChild(currentAiParagraph);
+                }
+                currentAiParagraph.textContent += transcript;
+                transcriptContainer.scrollTop = transcriptContainer.scrollHeight;
+            }
+
+            if (message.serverContent && message.serverContent.turnComplete) {
+                statusDisplay.textContent = "Escuchando...";
+                toggleBtn.classList.add('is-listening');
+                currentAiParagraph = null;
+            }
+            else if (!isPlaying) {
+                statusDisplay.textContent = "AI pensando...";
+                toggleBtn.classList.remove('is-listening');
+            }
+        }
+        
+        async function playNextChunk() {
+            if (isPlaying || audioResponseQueue.length === 0 || !audioContext) return;
+            
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+
+            isPlaying = true;
+            statusDisplay.textContent = "AI hablando...";
+            toggleBtn.classList.remove('is-listening');
+            
+            const base64Data = audioResponseQueue.shift();
+
+            // --- FIX: Use robust and fast decoding logic ---
+            const audioBytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+            const pcm16Data = new Int16Array(audioBytes.buffer, 0, audioBytes.length / 2);
+            const float32Data = new Float32Array(pcm16Data.length);
+            for (let i = 0; i < pcm16Data.length; i++) {
+                float32Data[i] = pcm16Data[i] / 32768.0;
+            }
+
+            const audioBuffer = audioContext.createBuffer(1, float32Data.length, 24000);
+            audioBuffer.copyToChannel(float32Data, 0);
+
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            source.start();
+            source.onended = () => { isPlaying = false; if (isRecording) playNextChunk(); };
+        }
+
+        function updateButtonUI(isActive) {
+            toggleBtnIcon.textContent = isActive ? 'stop' : 'mic';
+            toggleBtn.classList.toggle('is-active', isActive);
+            if (!isActive) toggleBtn.classList.remove('is-listening');
+        }
+
+        function downsampleBuffer(buffer, inRate, outRate) {
+            if (inRate === outRate) return buffer;
+            const ratio = inRate / outRate;
+            const newLen = Math.round(buffer.length / ratio);
+            const res = new Float32Array(newLen);
+            for (let i = 0; i < newLen; i++) {
+                res[i] = buffer[Math.round(i * ratio)];
+            }
+            return res;
+        }
+
+        function floatTo16BitPCM(input) {
+            const output = new Int16Array(input.length);
+            for (let i = 0; i < input.length; i++) {
+                output[i] = Math.max(-32768, Math.min(32767, input[i] * 32767));
+            }
+            return output;
+        }
+    </script>
+</body>
+</html>
