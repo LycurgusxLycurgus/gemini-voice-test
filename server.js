@@ -7,7 +7,7 @@ const { GoogleGenAI, Modality } = require('@google/genai');
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY;
-const MODEL_NAME = "gemini-2.5-flash-preview-native-audio-dialog";
+const MODEL_NAME = "gemini-2.5-flash-native-audio-preview-09-2025";
 const SYSTEM_PROMPT_PATH = path.join(__dirname, 'system_prompt.txt');
 const systemInstructionText = fs.readFileSync(SYSTEM_PROMPT_PATH, 'utf8');
 
