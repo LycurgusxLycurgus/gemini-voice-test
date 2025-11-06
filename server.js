@@ -7,7 +7,9 @@ const { GoogleGenAI, Modality } = require('@google/genai');
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY;
-const MODEL_NAME = "gemini-2.5-flash-preview-native-audio-dialog";
+const MODEL_NAME = "gemini-2.5-flash-native-audio-preview-09-2025";
+const SYSTEM_PROMPT_PATH = path.join(__dirname, 'system_prompt.txt');
+const systemInstructionText = fs.readFileSync(SYSTEM_PROMPT_PATH, 'utf8');
 
 if (API_KEY === "YOUR_API_KEY_HERE") {
     console.error("\n!!! ERROR: Please set your API_KEY in server.js !!!\n");
@@ -53,7 +55,6 @@ wss.on('connection', async (ws) => {
     console.log('Client connected');
 
     try {
-        const systemInstructionText = fs.readFileSync('system_prompt.txt', 'utf8');
         const ai = new GoogleGenAI({ apiKey: API_KEY });
 
         const config = {
@@ -73,32 +74,51 @@ wss.on('connection', async (ws) => {
             },
         };
 
+        let audioSequence = 0;
+
         const callbacks = {
             onopen: () => console.log('Google API session opened.'),
             onmessage: (message) => {
-                // --- FIX: Correctly handle binary audio data vs. other messages ---
                 if (ws.readyState !== ws.OPEN) return;
 
-                // Audio frames come in as a Buffer. Convert them
-                // to a real base-64 string and tag the payload.
-                if (message.data) {
-                    ws.send(JSON.stringify({
-                        type: 'AUDIO',
-                        data: Buffer.isBuffer(message.data)
-                            ? message.data.toString('base64')
-                            : message.data
-                    }));
-                }
+                try {
+                    if (message?.data) {
+                        const base64Audio = toBase64Audio(message.data);
+                        if (base64Audio) {
+                            ws.send(JSON.stringify({
+                                type: 'AUDIO',
+                                data: base64Audio,
+                                sequence: audioSequence++
+                            }));
+                        }
+                    }
 
-                // Forward everything else (transcripts, turnComplete, etc.) unchanged.
-                if (!message.data) {
-                    ws.send(JSON.stringify(message));
+                    if (message?.serverContent) {
+                        ws.send(JSON.stringify({
+                            type: 'SERVER_CONTENT',
+                            serverContent: message.serverContent
+                        }));
+                    }
+
+                    if (message?.error) {
+                        ws.send(JSON.stringify({
+                            type: 'ERROR',
+                            errorType: 'MODEL',
+                            message: message.error.message || 'Google API error'
+                        }));
+                    }
+                } catch (forwardError) {
+                    console.error('Failed to forward Gemini message:', forwardError);
                 }
             },
             onerror: (e) => {
                 console.error('Google API Error:', e);
                 if (ws.readyState === ws.OPEN) {
-                    ws.send(JSON.stringify({ error: `Google API Error: ${e.message}` }));
+                    ws.send(JSON.stringify({
+                        type: 'ERROR',
+                        errorType: 'MODEL',
+                        message: 'Google API Error'
+                    }));
                 }
             },
             onclose: (e) => console.log('Google API session closed. Reason:', e ? e.reason : 'No reason provided.'),
@@ -134,6 +154,13 @@ wss.on('connection', async (ws) => {
 
     } catch (error) {
         console.error('Failed to initialize Gemini session:', error);
+        if (ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify({
+                type: 'ERROR',
+                errorType: 'MODEL_INIT',
+                message: 'Failed to initialize Gemini session.'
+            }));
+        }
         ws.close(1011, 'Failed to initialize Gemini session.');
     }
 });
@@ -141,3 +168,20 @@ wss.on('connection', async (ws) => {
 server.listen(PORT, () => {
     console.log(`Server is listening on http://localhost:${PORT}`);
 });
+
+function toBase64Audio(data) {
+    if (!data) return null;
+    if (Buffer.isBuffer(data)) {
+        return data.toString('base64');
+    }
+    if (typeof data === 'string') {
+        return data;
+    }
+    if (ArrayBuffer.isView(data)) {
+        return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('base64');
+    }
+    if (data instanceof ArrayBuffer) {
+        return Buffer.from(data).toString('base64');
+    }
+    return null;
+}
